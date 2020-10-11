@@ -8,7 +8,76 @@ using UnityEngine;
 using UnityEngine.Networking;
 
 public class WaifuExplorer : MonoBehaviour {
+	/// <summary> Tightly packed struct to hold seed information. </summary>
+	public unsafe struct Seed {
+		/// <summary> Primary numbers for seed. Seem to be allowed anywhere in range [1,1000000) </summary>
+		public fixed int nums[16];
+		/// <summary> No idea what this does, it's always zero as far as I've seen. </summary>
+		public int extra;
+		/// <summary> Color summary, acts kinda as a uniquifier. </summary>
+		public fixed double color[3];
+		/// <summary> Construct a <see cref="Seed"/> from a <see cref="JsonArray"/> source </summary>
+		/// <param name="data"><see cref="JsonArray"/> containing exactly 18 elements,
+		/// 17 numbers and one array of 3 numbers at the end. </param>
+		public Seed(JsonArray data) {
+			if (data.Count == 18) {
+				for (int i = 0; i < 16; i++) {
+					nums[i] = data[i].intVal;
+				}
+				extra = data[16].intVal;
+				JsonArray col = data[17] as JsonArray;
+				if (col != null) {
+					color[0] = col[0].doubleVal;
+					color[1] = col[1].doubleVal;
+					color[2] = col[2].doubleVal;
+				}
+			} else {
+				for (int i = 0; i < 16; i++) {
+					nums[i] = 0;
+				}
+				extra = 0;
+				color[0] = 0;
+				color[1] = 0;
+				color[2] = 0;
+			}
+		}
+		/// <summary> Converts this <see cref="Seed"/> back into its <see cref="JsonArray"/> form </summary>
+		/// <returns> <see cref="JsonArray"/> containing same information </returns>
+		public JsonArray ToJsonArray() {
+			JsonArray main = new JsonArray();
+			for (int i = 0; i < 16; i++) {
+				main.Add(nums[i]);
+			}
+			main.Add(extra);
+			JsonArray col = new JsonArray();
+			main.Add(col);
+			col.Add(color[0]);
+			col.Add(color[1]);
+			col.Add(color[2]);
+			return main;
+		}
+		/// <summary> Converts this <see cref="Seed"/> back into plain JSON <see cref="string"/> form </summary>
+		/// <returns> <see cref="string"/> containing same information </returns>
+		public override string ToString() {
+			StringBuilder str = new StringBuilder("[");
+			for (int i = 0; i < 16; i++) {
+				str.Append(nums[i]);
+				str.Append(",");
+			}
+			str.Append(extra);
+			str.Append(",[");
+			str.Append(color[0]);
+			str.Append(",");
+			str.Append(color[1]);
+			str.Append(",");
+			str.Append(color[2]);
+			str.Append("]]");
 
+			return str.ToString();
+		}
+	}
+
+	/// <summary> Class holding Girl data </summary>
 	[Serializable] public class Girl {
 		private string _id;
 		public string id { 
@@ -17,19 +86,31 @@ public class WaifuExplorer : MonoBehaviour {
 				return _id = seeds.ToString();
 			}
 		}
+		private string _compressedID;
+		public string compressedID {
+			get {
+				if (_compressedID != null) { return _compressedID; }
+				return _compressedID = Pack.GZipBase64(seed).FilenameSafeBase64();
+			}
+		}
 		public JsonArray seeds;
+		public Seed seed;
 		public Texture2D big;
 		public Texture2D small;
+
 		public Girl(JsonArray seeds, string base64) {
 			this.seeds = seeds;
 			small = DecodeBase64Png(base64);
+			seed = new Seed(seeds);
 		}
 		public Girl(JsonArray seeds, Texture2D small) {
 			this.seeds = seeds;
 			this.small = small;
+			seed = new Seed(seeds);
 		}
 	}
 
+	const string GZIP_HEADER = "H4sIAAAAAAAAC";
 	public List<Renderer> renderers;
 	public Renderer primary;
 	public Renderer previousGirl;
@@ -41,13 +122,9 @@ public class WaifuExplorer : MonoBehaviour {
 	public Dictionary<string, Girl> allGirls;
 
 	public GUISkin skin;
-
-
-	
 	
 	public int historyIndex = -1;
 	public int prevGirlsIndex = -1;
-	
 	
 	public int step = 1;
 
@@ -58,11 +135,6 @@ public class WaifuExplorer : MonoBehaviour {
 	public Texture2D unsetTexture;
 	public Texture2D loadingTexture;
 	Texture2D pixel;
-
-	bool browserOpen;
-	string browserLocation;
-	Vector2 browserDirScroll;
-	Vector2 browserFileScroll;
 
 	GUILayoutOption[] CORNER_BUTTON_OPTS = new GUILayoutOption[] { GUILayout.Width(260), GUILayout.Height(24) };
 
@@ -119,10 +191,65 @@ public class WaifuExplorer : MonoBehaviour {
 		}
 	}
 
+	
+
+	JsonArray UnpackSeedsFromFilename(string filename) {
+		
+		try {
+			JsonArray array = (JsonArray)Json.Parse(filename);
+			if (array.Count != 18) { throw new Exception(); }
+			return array;
+		} catch (Exception) { }
+		
+		Seed seed;
+		if (Unpack.TryGZipBase64(filename.FilenameToBase64(), out seed)) {
+			return seed.ToJsonArray();
+		}
+
+		return null;
+	}
+
+	private string LoadGirlFromFile(string path) {
+		Debug.Log($"Attempting to load girl from {path}");
+		var file = FromLastSlash(path);
+		if (!file.StartsWith(GZIP_HEADER)) {
+			file = GZIP_HEADER + file;
+		}
+		Debug.Log($"Actual file is now {file}");
+		var seedText = file.Substring(0, file.LastIndexOf('.'));
+		JsonArray arr = UnpackSeedsFromFilename(seedText);
+		if (arr != null) {
+			string gid = arr.ToString();
+			Debug.Log($"got array! {gid}");
+			if (!allGirls.ContainsKey(gid)) {
+		
+				try {
+					byte[] data = File.ReadAllBytes(path);
+					Texture2D tex = new Texture2D(8, 8);
+					tex.LoadImage(data);
+					Girl g = new Girl(arr, tex);
+					allGirls[g.id] = g;
+					return gid;
+				} catch (Exception e) {
+					Debug.LogWarning($"Failed to load waifu file: {e}");
+					return null;
+				}
+			} else {
+				return gid;
+			}
+		}
+		return null;
+	}
+
+
+	bool showingDialog = false;
+	bool browserOpen;
+	string browserLocation;
+	Vector2 browserDirScroll;
+	Vector2 browserFileScroll;
+	Vector4 prams = new Vector4(640, 400, 0, 0);
 	Texture2D loaderTex = null;
 	string lastLoaderTex = "";
-	bool showingDialog = false;
-	Vector4 prams = new Vector4(640, 400, 0, 0);
 	void OnGUI() {
 		GUI.skin = skin;
 		if (browserOpen || showingDialog) {
@@ -144,33 +271,15 @@ public class WaifuExplorer : MonoBehaviour {
 		if (browserOpen) {
 
 			if (FileBrowser(ref browserLocation, ref browserDirScroll, ref browserFileScroll, prams)) {
-				string seeds = FromLastSlash( browserLocation ).Replace(".png", "");
-				if (allGirls.ContainsKey(seeds)) {
-					PushWaifu(seeds);
+				string id = LoadGirlFromFile( browserLocation );
+				if (allGirls.ContainsKey(id)) {
+					PushWaifu(id);
 				}
 			} else {
 				if (lastLoaderTex != browserLocation && browserLocation.EndsWith(".png")) {
-					
-					string seeds = FromLastSlash(browserLocation).Replace(".png", "");
-					if (!allGirls.ContainsKey(seeds)) {
-						
-						try {
-							JsonArray arr = Json.Parse<JsonArray>(seeds);
-							byte[] data = File.ReadAllBytes(browserLocation);
-							Texture2D tex = new Texture2D(8, 8);
-							tex.LoadImage(data);
-							loaderTex = tex;
-							
-							Girl g = new Girl(arr, tex);
-							allGirls[g.id] = g;
-							lastLoaderTex = browserLocation;
-
-						} catch (Exception e) {
-							Debug.LogWarning($"Failed to load girl file {e}");
-
-						}
-					} else {
-						loaderTex = allGirls[seeds].small;
+					string id = LoadGirlFromFile(browserLocation);
+					if (id != null) {
+						loaderTex = allGirls[id].small;
 						lastLoaderTex = browserLocation;
 					}
 				} else {
@@ -206,7 +315,41 @@ public class WaifuExplorer : MonoBehaviour {
 			if (GUILayout.Button("Save Waifus", CORNER_BUTTON_OPTS)) {
 				SaveGirls();
 			}
+			if (GUILayout.Button("Wtf", CORNER_BUTTON_OPTS)) {
+				RandomizeColorsOnBig();
+			}
 		}
+	}
+
+	void RandomizeColorsOnBig() {
+		JsonArray deriveNewColors(JsonArray src) {
+			JsonArray copy = new JsonArray();
+			for (int i = 0; i < src.Count; i++) { copy[i] = src[i]; }
+			JsonArray arr = new JsonArray();
+			copy[copy.Count-1] = arr;
+			arr.Add(UnityEngine.Random.value * 255);
+			arr.Add(UnityEngine.Random.value * 255);
+			arr.Add(UnityEngine.Random.value * 255);
+			return copy;
+		}
+		Girl currentGirl = allGirls[history[historyIndex]];
+		JsonArray derivedSeeds = deriveNewColors(currentGirl.seeds);
+
+		MakeNewGirl(derivedSeeds);
+		
+	}
+	void MakeNewGirl(JsonArray seeds) {
+		JsonObject request = new JsonObject("currentGirl", seeds, "step", step, "size", 512);
+
+		StartCoroutine(PostJson($"{baseUrl}/generate_big", request.ToString(), (json) => {
+			JsonObject response = Json.Parse<JsonObject>(json);
+			Girl newGirl = new Girl(seeds, DecodeBase64Png(response.Get<string>("girl")));
+			allGirls[newGirl.id] = newGirl;
+
+			PushWaifu(newGirl.id);
+
+			//primary.material.mainTexture = currentGirl.big;
+		}));
 	}
 
 	void OpenWaifuDialog() {
@@ -220,26 +363,15 @@ public class WaifuExplorer : MonoBehaviour {
 			if (result == DialogResult.OK) {
 				var path = dialog.FileName;
 				//Debug.Log($"Path: {path}");
-				var seeds = FromLastSlash(path);
-				//Debug.Log($"Fname: {seeds}");
-				seeds = seeds.Substring(0, seeds.LastIndexOf('.'));
-				//Debug.Log($"Fname2: {seeds}");
-				try {
-					JsonArray arr = Json.Parse<JsonArray>(seeds);
-					byte[] data = File.ReadAllBytes(path);
-					Texture2D tex = new Texture2D(8, 8);
-					tex.LoadImage(data);
-					Girl g = new Girl(arr, tex);
-					allGirls[g.id] = g;
-
-					PushWaifu(g.id);
-				} catch (Exception e) {
-					Debug.LogWarning($"Failed to load waifu file: {e}");
+				string id = LoadGirlFromFile(path);
+				if (id != null) {
+					PushWaifu(id);
 				}
 			}
 			showingDialog = false;
 		});
 	}
+
 
 	void ClickedPrevious() {
 		if (historyIndex-1 >= 0) {
@@ -281,10 +413,16 @@ public class WaifuExplorer : MonoBehaviour {
 		foreach (var pair in allGirls) {
 			Girl girl = pair.Value;
 			byte[] pngData = girl.small.EncodeToPNG();
-			string filename = $"waifus/{girl.id}.png";
+			string filename = girl.compressedID;
+			if (filename.StartsWith(GZIP_HEADER)) {
+				filename = filename.Substring(GZIP_HEADER.Length);
+			}
+			string filepath = $"waifus/{filename}.png";
+
+			// string filename = $"waifus/{girl.id}.png";
 			
-			if (!File.Exists(filename)) {
-				File.WriteAllBytes(filename, pngData);
+			if (!File.Exists(filepath)) {
+				File.WriteAllBytes(filepath, pngData);
 				saved++;
 			}
 		}
@@ -293,6 +431,22 @@ public class WaifuExplorer : MonoBehaviour {
 
 	void RefreshBig() {
 		Girl currentGirl = allGirls[history[historyIndex]];
+		
+
+		/*string packedData = currentGirl.compressedID;
+		byte[] base64Decoded = Unpack.RawBase64(packedData);
+		byte[] unzipped = GZip.Decompress(base64Decoded);
+		Seed unpackedSeed = Unsafe.FromBytes<Seed>(unzipped);
+		JsonArray unpackedSeeds = unpackedSeed.ToJsonArray();
+		string unpackedJson = unpackedSeeds.ToString();
+		
+		Debug.Log($"Using waifu. ID = {currentGirl.id}.png"
+			+ $"\nRawSeed: {currentGirl.seed}"
+			+ $"\nCompressed2: {currentGirl.compressedID}"
+			+ $"\nReconstructed Seed: {unpackedSeed}" 
+			+ $"\nfully unpacked: {unpackedJson}");
+		*/
+		
 
 		JsonObject request = new JsonObject("currentGirl", currentGirl.seeds, "step", step, "size", 512);
 		if (!currentGirl.big) {
@@ -541,6 +695,7 @@ public class WaifuExplorer : MonoBehaviour {
 		return s;
 	}
 	
+	
 	public static T SelectList<T>(IEnumerable<T> list, T selected, Func<T, string> toString, GUIStyle defaultStyle = null, GUIStyle selectedStyle = null) where T : class {
 		if (defaultStyle == null) { defaultStyle = GUI.skin.GetStyle("Button"); }
 		if (selectedStyle == null) { selectedStyle = GUI.skin.GetStyle("Button"); }
@@ -566,4 +721,9 @@ public class WaifuExplorer : MonoBehaviour {
 	}
 
 	
+}
+
+internal static class Helpers {
+	internal static string FilenameSafeBase64(this string str) { return str.Replace('/', '-'); }
+	internal static string FilenameToBase64(this string str) { return str.Replace('-', '/'); }
 }
